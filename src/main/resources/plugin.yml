@@ -1,0 +1,8 @@
+name: BuildMisc
+version: '1.0'
+main: fr.supermax_8.buildmisc.BuildMisc
+api-version: '1.21'
+authors: [ SuperMax_8 ]
+commands:
+  bm:
+    permission: opadmin
