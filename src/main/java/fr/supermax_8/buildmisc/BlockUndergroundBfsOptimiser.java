@@ -6,143 +6,107 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 
-import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 public class BlockUndergroundBfsOptimiser {
 
-    private final int MAX_ITERATION_PER_TICK = 1_300_000;
+    private static final int MAX_BLOCKS_PER_TICK = 80_000;
 
     private final Location loc1, loc2;
-    private final int sizeX, sizeY, sizeZ;
-    private final int minX, minY, minZ;
-    private AtomicInt3DMarkSet visionArea, occludingBlocks, toKeep;
-    private final Location baseLoc;
-    private BlockZoneOptimiser.State state = BlockZoneOptimiser.State.FLOOD_FILL;
-    private AtomicInt3DMarkSet.MarkedIterator iterator;
-    private CuboidBlockIterator blockIterator;
-    private int totalDeleted = 0;
-    private double maxDistance;
+    private CuboidBlockIterator iterator;
 
-    public BlockUndergroundBfsOptimiser(Location baseLoc, Location loc1, Location loc2) {
-        this.baseLoc = baseLoc.clone();
+    private final Set<BlockPos> toDelete = new HashSet<>();
+    private int totalDeleted = 0;
+
+    private enum State {
+        COLLECT,
+        DELETE
+    }
+
+    private State state = State.COLLECT;
+
+    public BlockUndergroundBfsOptimiser(Location loc1, Location loc2) {
         this.loc1 = loc1;
         this.loc2 = loc2;
-        minX = Math.min(loc1.getBlockX(), loc2.getBlockX());
-        minY = Math.min(loc1.getBlockY(), loc2.getBlockY());
-        minZ = Math.min(loc1.getBlockZ(), loc2.getBlockZ());
+        this.iterator = new CuboidBlockIterator(loc1, loc2);
+        start();
+    }
 
-        sizeX = Math.abs(loc1.getBlockX() - loc2.getBlockX()) + 1;
-        sizeY = Math.abs(loc1.getBlockY() - loc2.getBlockY()) + 1;
-        sizeZ = Math.abs(loc1.getBlockZ() - loc2.getBlockZ()) + 1;
+    private void start() {
+        Bukkit.getScheduler().runTaskTimer(BuildMisc.instance, task -> {
 
-        visionArea = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
-        occludingBlocks = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
-        toKeep = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
-
-        maxDistance = loc1.distance(loc2) + 5;
-
-        Int3DMarkSetBFS bfs = new Int3DMarkSetBFS(visionArea, List.of(toLocal(baseLoc)), iii -> {
-            int[] worldPos = toWorld(iii[0], iii[1], iii[2]);
-            boolean successful = !isSolidBlock(worldPos[0], worldPos[1], worldPos[2]);
-            if (successful) {
-                Bukkit.getOnlinePlayers().forEach(p -> {
-                    p.sendBlockChange(new Location(baseLoc.getWorld(), worldPos[0], worldPos[1], worldPos[2]), Material.DIAMOND_BLOCK.createBlockData());
-                });
-            }
-            return successful ? Int3DMarkSetBFS.ValidatorResponse.VALIDATED : Int3DMarkSetBFS.ValidatorResponse.NON_VALIDATED;
-        }, MAX_ITERATION_PER_TICK);
-
-        Bukkit.getScheduler().runTaskTimer(BuildMisc.instance, t -> {
-            World w = baseLoc.getWorld();
             switch (state) {
-                case FLOOD_FILL -> {
-                    if (bfs.tick()) {
-                        blockIterator = new CuboidBlockIterator(loc1, loc2);
-                        state = BlockZoneOptimiser.State.COMPUTE_OCCLUDING;
-                    }
-                    iterator = visionArea.iterator();
-                }
-                case COMPUTE_OCCLUDING -> {
-                    if (!blockIterator.hasNext()) {
-                        System.out.println("End occluding");
-                        Bukkit.getScheduler().runTaskAsynchronously(BuildMisc.instance, () -> {
-                            computeVisible();
-                            startDeleteBlockTicking();
-                        });
-                        t.cancel();
+
+                case COLLECT -> {
+                    if (!iterator.hasNext()) {
+                        state = State.DELETE;
+                        iterator = new CuboidBlockIterator(loc1, loc2);
                         return;
                     }
-                    for (Block b : blockIterator.next(MAX_ITERATION_PER_TICK)) {
-                        if (b.isEmpty()) continue;
-                        int[] localC = toLocal(b.getLocation());
 
-                        if (b.getType().isOccluding() && b.getType() != Material.BARRIER) {
-                            Bukkit.getOnlinePlayers().forEach(p -> {
-                                p.sendBlockChange(b.getLocation(), Material.EMERALD_BLOCK.createBlockData());
-                            });
-                            occludingBlocks.set(localC[0], localC[1], localC[2]);
+                    for (Block b : iterator.next(MAX_BLOCKS_PER_TICK)) {
+                        if (shouldDelete(b)) {
+                            toDelete.add(BlockPos.of(b));
+                        }
+                    }
+                }
+
+                case DELETE -> {
+                    if (!iterator.hasNext()) {
+                        Bukkit.getLogger().info(
+                                "[Optimiser] Done. Deleted blocks: " + totalDeleted
+                        );
+                        task.cancel();
+                        return;
+                    }
+
+                    for (Block b : iterator.next(MAX_BLOCKS_PER_TICK)) {
+                        if (toDelete.contains(BlockPos.of(b))) {
+                            b.setType(Material.AIR, false);
+                            totalDeleted++;
                         }
                     }
                 }
             }
+
         }, 0, 1);
     }
 
-    private void startDeleteBlockTicking() {
-        blockIterator = new CuboidBlockIterator(loc1, loc2);
-        Bukkit.getScheduler().runTaskTimer(BuildMisc.instance, t -> {
-            if (!blockIterator.hasNext()) {
-                System.out.println("End optimizing, total deletion: " + totalDeleted);
-                t.cancel();
-                return;
-            }
-            for (Block b : blockIterator.next(MAX_ITERATION_PER_TICK)) {
-                if (b.isEmpty()) continue;
-                int[] localC = toLocal(b.getLocation());
+    /* ============================= */
+    /* ===== CORE CONDITION ======== */
+    /* ============================= */
 
-                if (!toKeep.get(localC[0], localC[1], localC[2])) {
-                    b.setType(Material.AIR);
-                    totalDeleted++;
-                }
-            }
-        }, 0, 0);
+    private boolean shouldDelete(Block b) {
+
+        if (!isSolidOpaque(b)) return false;
+
+        World w = b.getWorld();
+        int x = b.getX();
+        int y = b.getY();
+        int z = b.getZ();
+
+        return isSolidOpaque(w.getBlockAt(x + 1, y, z))
+                && isSolidOpaque(w.getBlockAt(x - 1, y, z))
+                && isSolidOpaque(w.getBlockAt(x, y + 1, z))
+                && isSolidOpaque(w.getBlockAt(x, y - 1, z))
+                && isSolidOpaque(w.getBlockAt(x, y, z + 1))
+                && isSolidOpaque(w.getBlockAt(x, y, z - 1));
     }
 
-    private boolean isInBounds(int worldX, int worldY, int worldZ) {
-        return worldX >= minX && worldX < minX + sizeX
-                && worldY >= minY && worldY < minY + sizeY
-                && worldZ >= minZ && worldZ < minZ + sizeZ;
+    private boolean isSolidOpaque(Block b) {
+        Material m = b.getType();
+        return m.isSolid() && m.isOccluding() && m != Material.BARRIER;
     }
 
-    private boolean isSolidBlock(int worldX, int worldY, int worldZ) {
-        return baseLoc.getWorld().getBlockAt(worldX, worldY, worldZ).getType().isSolid();
-    }
+    /* ============================= */
+    /* ===== BLOCK POSITION ======== */
+    /* ============================= */
 
-    // Map world block -> local
-    public int[] toLocal(Location loc) {
-        return toLocal(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
-    }
+    private record BlockPos(int x, int y, int z) {
 
-    public int[] toLocal(int x, int y, int z) {
-        int lx = x - minX;
-        int ly = y - minY;
-        int lz = z - minZ;
-        return new int[]{lx, ly, lz};
+        static BlockPos of(Block b) {
+            return new BlockPos(b.getX(), b.getY(), b.getZ());
+        }
     }
-
-    // Map local -> world block
-    public int[] toWorld(int lx, int ly, int lz) {
-        int wx = lx + minX;
-        int wy = ly + minY;
-        int wz = lz + minZ;
-        return new int[]{wx, wy, wz};
-    }
-
-    enum State {
-        FLOOD_FILL,
-        COMPUTE_OCCLUDING,
-        COMPUTE_VISIBLE,
-        DELETE_BLOCKS
-    }
-
 }

@@ -35,10 +35,15 @@ public class BMCommand implements CommandExecutor {
                 if (checkLoc(p, pos2)) return false;
                 p.sendMessage("Pos2 set");
             }
-            case "optimizeyesimsure" -> {
+            /*case "optimizeyesimsure" -> {
                 p.sendMessage("Starting build optimizer...");
                 if (checkLoc(p, pos1) || checkLoc(p, pos2)) return true;
                 new BlockZoneOptimiser(p.getLocation().clone(), pos1.clone(), pos2.clone());
+            }*/
+            case "underground" -> {
+                p.sendMessage("Starting build optimizer...");
+                if (checkLoc(p, pos1) || checkLoc(p, pos2)) return true;
+                new BlockUndergroundBfsOptimiser(pos1.clone(), pos2.clone());
             }
             case "test" -> {
                 Location baseLoc = p.getLocation();
