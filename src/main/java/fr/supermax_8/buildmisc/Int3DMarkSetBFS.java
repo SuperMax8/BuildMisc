@@ -3,21 +3,22 @@ package fr.supermax_8.buildmisc;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Queue;
-import java.util.function.Predicate;
+import java.util.function.Function;
 
 public class Int3DMarkSetBFS {
 
     private final Queue<int[]> bfsQueue = new ArrayDeque<>();
 
-    private final Predicate<int[]> validator;
+    private final Function<int[], ValidatorResponse> validator;
     private final AtomicInt3DMarkSet set;
     private final int maxItrPerTick;
 
     private final int sizeX, sizeY, sizeZ;
 
-    private int totalItr = 0;
+    private int totalIteration = 0;
+    private int[] goal = null;
 
-    public Int3DMarkSetBFS(AtomicInt3DMarkSet set, Collection<int[]> startingPoints, Predicate<int[]> validator, int maxItrPerTick) {
+    public Int3DMarkSetBFS(AtomicInt3DMarkSet set, Collection<int[]> startingPoints, Function<int[], ValidatorResponse> validator, int maxItrPerTick) {
         this.set = set;
         this.validator = validator;
         this.maxItrPerTick = maxItrPerTick;
@@ -30,10 +31,10 @@ public class Int3DMarkSetBFS {
     public boolean tick() {
         int iterations = 0;
 
-        while (!bfsQueue.isEmpty() && iterations < maxItrPerTick) {
+        while (!bfsQueue.isEmpty() && (maxItrPerTick == -1 || iterations < maxItrPerTick)) {
             int[] pos = bfsQueue.poll();
             iterations++;
-            totalItr++;
+            totalIteration++;
 
             int x = pos[0];
             int y = pos[1];
@@ -54,7 +55,17 @@ public class Int3DMarkSetBFS {
 
                 // Optional: check if solid block
 
-                if (!validator.test(new int[]{nx, ny, nz})) continue;
+                int[] cd = {nx, ny, nz};
+                ValidatorResponse response = validator.apply(cd);
+                switch (response) {
+                    case NON_VALIDATED -> {
+                        continue;
+                    }
+                    case GOAL -> {
+                        goal = cd;
+                        return true;
+                    }
+                }
 
                 // Mark and enqueue
                 set.set(nx, ny, nz);
@@ -65,8 +76,18 @@ public class Int3DMarkSetBFS {
         return bfsQueue.isEmpty();
     }
 
-    public int getTotalItr() {
-        return totalItr;
+    public int getTotalIteration() {
+        return totalIteration;
+    }
+
+    public int[] getGoal() {
+        return goal;
+    }
+
+    public enum ValidatorResponse {
+        VALIDATED,
+        NON_VALIDATED,
+        GOAL
     }
 
 }

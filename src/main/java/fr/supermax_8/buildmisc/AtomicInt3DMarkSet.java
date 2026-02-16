@@ -76,6 +76,105 @@ public final class AtomicInt3DMarkSet implements Cloneable {
         }
     }
 
+    /**
+     * Ray trace between two points to check if the path is clear.
+     *
+     * @param startX Start X
+     * @param startY Start Y
+     * @param startZ Start Z
+     * @param endX   End X
+     * @param endY   End Y
+     * @param endZ   End Z
+     * @return true if path is clear (no marked voxels in between), false otherwise
+     */
+    public boolean isLineClear(double startX, double startY, double startZ,
+                               double endX, double endY, double endZ) {
+
+        double dirX = endX - startX;
+        double dirY = endY - startY;
+        double dirZ = endZ - startZ;
+
+        double maxDist = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+
+        // normalize direction
+        if (maxDist == 0) return true;
+        dirX /= maxDist;
+        dirY /= maxDist;
+        dirZ /= maxDist;
+
+        return rayTrace(startX, startY, startZ, dirX, dirY, dirZ, maxDist) == null;
+    }
+
+    /**
+     * Ray trace in the AtomicInt3DMarkSet from a start point in a given direction.
+     *
+     * @param startX    Start X (double)
+     * @param startY    Start Y (double)
+     * @param startZ    Start Z (double)
+     * @param dirX      Direction X
+     * @param dirY      Direction Y
+     * @param dirZ      Direction Z
+     * @param maxDist   Maximum distance to trace
+     * @return the first hit voxel coordinates as int[3] or null if none
+     */
+    public int[] rayTrace(double startX, double startY, double startZ,
+                          double dirX, double dirY, double dirZ, double maxDist) {
+
+        int x = (int) Math.floor(startX);
+        int y = (int) Math.floor(startY);
+        int z = (int) Math.floor(startZ);
+
+        int stepX = dirX > 0 ? 1 : (dirX < 0 ? -1 : 0);
+        int stepY = dirY > 0 ? 1 : (dirY < 0 ? -1 : 0);
+        int stepZ = dirZ > 0 ? 1 : (dirZ < 0 ? -1 : 0);
+
+        double tMaxX = stepX != 0 ? ((stepX > 0 ? (x + 1) : x) - startX) / dirX : Double.POSITIVE_INFINITY;
+        double tMaxY = stepY != 0 ? ((stepY > 0 ? (y + 1) : y) - startY) / dirY : Double.POSITIVE_INFINITY;
+        double tMaxZ = stepZ != 0 ? ((stepZ > 0 ? (z + 1) : z) - startZ) / dirZ : Double.POSITIVE_INFINITY;
+
+        double tDeltaX = stepX != 0 ? 1.0 / Math.abs(dirX) : Double.POSITIVE_INFINITY;
+        double tDeltaY = stepY != 0 ? 1.0 / Math.abs(dirY) : Double.POSITIVE_INFINITY;
+        double tDeltaZ = stepZ != 0 ? 1.0 / Math.abs(dirZ) : Double.POSITIVE_INFINITY;
+
+        double dist = 0;
+
+        while (dist <= maxDist) {
+            // Check bounds
+            if (x >= 0 && y >= 0 && z >= 0 && x < getSizeX() && y < getSizeY() && z < getSizeZ()) {
+                if (get(x, y, z)) {
+                    return new int[]{x, y, z}; // hit
+                }
+            } else {
+                return null; // outside grid
+            }
+
+            // Step to next voxel
+            if (tMaxX < tMaxY) {
+                if (tMaxX < tMaxZ) {
+                    x += stepX;
+                    dist = tMaxX;
+                    tMaxX += tDeltaX;
+                } else {
+                    z += stepZ;
+                    dist = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                }
+            } else {
+                if (tMaxY < tMaxZ) {
+                    y += stepY;
+                    dist = tMaxY;
+                    tMaxY += tDeltaY;
+                } else {
+                    z += stepZ;
+                    dist = tMaxZ;
+                    tMaxZ += tDeltaZ;
+                }
+            }
+        }
+
+        return null; // nothing hit within maxDist
+    }
+
     public int getSizeX() {
         return sizeX;
     }

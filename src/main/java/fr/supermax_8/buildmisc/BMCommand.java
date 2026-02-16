@@ -4,14 +4,16 @@ import io.papermc.paper.raytracing.RayTraceTarget;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.util.BlockVector;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
+
+import java.util.*;
 
 public class BMCommand implements CommandExecutor {
 
@@ -55,12 +57,73 @@ public class BMCommand implements CommandExecutor {
                 p.sendMessage(" " + result.toString());
                 p.sendBlockChange(result.getHitBlock().getLocation(), Material.DIAMOND_BLOCK.createBlockData());
             }
-            case "test2" -> {
-                Location baseLoc = p.getLocation();
-                rayTraceVisibleBlocks(baseLoc.getWorld(), baseLoc, p.getLocation().getDirection());
+            case "testexpand" -> {
+                Octant octant = new Octant(List.of(
+                        new Vector(1, 0, 0),
+                        new Vector(0, 0, 1),
+                        new Vector(0, -1, 0)
+                ), p.getLocation().clone());
+                Collection<Location> expand = expand(octant);
+                expand.forEach(l -> {
+                    /*l.getBlock().setType(Material.DIAMOND_BLOCK);*/
+                    p.sendBlockChange(l, Material.DIAMOND_BLOCK.createBlockData());
+                });
+                p.sendMessage(expand.size() + " ");
             }
         }
         return false;
+    }
+
+    public Collection<Location> expand(Octant octant) {
+        List<Location> locs = new ArrayList<>();
+        Set<BlockVector> visited = new HashSet<>();
+        int i = 0;
+        while (!octant.nodes.isEmpty() && (i < 1000000)) {
+            Node pos = octant.nodes.poll();
+            BlockVector key = new BlockVector(
+                    pos.loc.getBlockX(),
+                    pos.loc.getBlockY(),
+                    pos.loc.getBlockZ()
+            );
+
+            if (!visited.add(key)) continue;
+
+            locs.add(pos.loc);
+
+            if (pos.loc.distanceSquared(octant.origin) >= octant.distance2) continue;
+            for (Vector dir : octant.dirs) {
+                Location loc = pos.loc.clone().add(dir);
+                if (loc.getBlock().getType().isOccluding()) continue;
+                octant.nodes.add(new Node(loc));
+            }
+            i++;
+        }
+        return locs;
+    }
+
+    public class Octant {
+
+        List<Vector> dirs;
+        private final Queue<Node> nodes = new ArrayDeque<>();
+        double distance2 = 100 * 100;
+        Location origin;
+
+        public Octant(List<Vector> dirs, Location origin) {
+            this.dirs = dirs;
+            this.origin = origin;
+            nodes.add(new Node(origin));
+        }
+
+
+    }
+
+    public class Node {
+
+        Location loc;
+
+        public Node(Location loc) {
+            this.loc = loc;
+        }
     }
 
     private boolean checkLoc(Player p, Location loc) {
@@ -73,61 +136,6 @@ public class BMCommand implements CommandExecutor {
             return true;
         }
         return false;
-    }
-
-    private void rayTraceVisibleBlocks(World world, Location start, Vector direction) {
-        double x0 = start.getX();
-        double y0 = start.getY();
-        double z0 = start.getZ();
-
-        int ix = (int) Math.floor(x0);
-        int iy = (int) Math.floor(y0);
-        int iz = (int) Math.floor(z0);
-
-        // Determine step directions
-        int stepX = direction.getX() > 0 ? 1 : (direction.getX() < 0 ? -1 : 0);
-        int stepY = direction.getY() > 0 ? 1 : (direction.getY() < 0 ? -1 : 0);
-        int stepZ = direction.getZ() > 0 ? 1 : (direction.getZ() < 0 ? -1 : 0);
-
-        double tMaxX = stepX != 0 ? ((stepX > 0 ? (ix + 1) - x0 : x0 - ix) / Math.abs(direction.getX())) : Double.POSITIVE_INFINITY;
-        double tMaxY = stepY != 0 ? ((stepY > 0 ? (iy + 1) - y0 : y0 - iy) / Math.abs(direction.getY())) : Double.POSITIVE_INFINITY;
-        double tMaxZ = stepZ != 0 ? ((stepZ > 0 ? (iz + 1) - z0 : z0 - iz) / Math.abs(direction.getZ())) : Double.POSITIVE_INFINITY;
-
-        double tDeltaX = stepX != 0 ? 1.0 / Math.abs(direction.getX()) : Double.POSITIVE_INFINITY;
-        double tDeltaY = stepY != 0 ? 1.0 / Math.abs(direction.getY()) : Double.POSITIVE_INFINITY;
-        double tDeltaZ = stepZ != 0 ? 1.0 / Math.abs(direction.getZ()) : Double.POSITIVE_INFINITY;
-
-        int steps = 0;
-        int maxSteps = (int) 40;
-
-        while (steps++ < maxSteps) {
-
-            Material mat = world.getBlockAt(ix, iy, iz).getType();
-
-            if (mat.isOccluding()) {
-                world.getBlockAt(ix, iy, iz).setType(Material.DIAMOND_BLOCK);
-                break;
-            }
-
-            // Advance to next voxel
-            if (tMaxX < tMaxY) {
-                if (tMaxX < tMaxZ) {
-                    ix += stepX;
-                    tMaxX += tDeltaX;
-                } else {
-                    iz += stepZ;
-                    tMaxZ += tDeltaZ;
-                }
-            } else {
-                if (tMaxY < tMaxZ) {
-                    iy += stepY;
-                    tMaxY += tDeltaY;
-                } else {
-                    iz += stepZ;
-                    tMaxZ += tDeltaZ;
-                }
-            }
-        }
     }
 
 }

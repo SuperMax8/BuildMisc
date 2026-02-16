@@ -1,12 +1,14 @@
 package fr.supermax_8.buildmisc;
 
-import io.papermc.paper.raytracing.RayTraceTarget;
-import org.bukkit.*;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
-import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -29,9 +31,10 @@ public class BlockZoneOptimiser {
     private final int MAX_ITERATION_PER_TICK = 1_300_000;
     private final int MAX_ITERATION_OPTIMISE_PER_TICK = 5_000;
 
+    private final Location loc1, loc2;
     private final int sizeX, sizeY, sizeZ;
     private final int minX, minY, minZ;
-    private AtomicInt3DMarkSet visionArea, visited, visibleArea;
+    private AtomicInt3DMarkSet visionArea, occludingBlocks, toRemoveBlocks;
     private final Location baseLoc;
     private State state = State.FLOOD_FILL;
     private AtomicInt3DMarkSet.MarkedIterator iterator;
@@ -41,6 +44,8 @@ public class BlockZoneOptimiser {
 
     public BlockZoneOptimiser(Location baseLoc, Location loc1, Location loc2) {
         this.baseLoc = baseLoc.clone();
+        this.loc1 = loc1;
+        this.loc2 = loc2;
         minX = Math.min(loc1.getBlockX(), loc2.getBlockX());
         minY = Math.min(loc1.getBlockY(), loc2.getBlockY());
         minZ = Math.min(loc1.getBlockZ(), loc2.getBlockZ());
@@ -50,63 +55,102 @@ public class BlockZoneOptimiser {
         sizeZ = Math.abs(loc1.getBlockZ() - loc2.getBlockZ()) + 1;
 
         visionArea = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
-        visited = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
-        visibleArea = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
+        occludingBlocks = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
+        toRemoveBlocks = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
 
         maxDistance = loc1.distance(loc2) + 5;
 
         Int3DMarkSetBFS visionBfs = new Int3DMarkSetBFS(visionArea, List.of(toLocal(baseLoc)), iii -> {
             int[] worldPos = toWorld(iii[0], iii[1], iii[2]);
-            return !isSolidBlock(worldPos[0], worldPos[1], worldPos[2]);
+            boolean successful = !isSolidBlock(worldPos[0], worldPos[1], worldPos[2]);
+            if (successful) {
+                Bukkit.getOnlinePlayers().forEach(p -> {
+                    p.sendBlockChange(new Location(baseLoc.getWorld(), worldPos[0], worldPos[1], worldPos[2]), Material.DIAMOND_BLOCK.createBlockData());
+                });
+            }
+            return successful ? Int3DMarkSetBFS.ValidatorResponse.VALIDATED : Int3DMarkSetBFS.ValidatorResponse.NON_VALIDATED;
         }, MAX_ITERATION_PER_TICK);
+
         Bukkit.getScheduler().runTaskTimer(BuildMisc.instance, t -> {
             World w = baseLoc.getWorld();
             switch (state) {
                 case FLOOD_FILL -> {
-                    if (visionBfs.tick()) state = State.COMPUTE_VISIBLE;
+                    if (visionBfs.tick()) {
+                        blockIterator = new CuboidBlockIterator(loc1, loc2);
+                        state = State.COMPUTE_OCCLUDING;
+                    }
                     iterator = visionArea.iterator();
                 }
-                case COMPUTE_VISIBLE -> {
-                    long t1 = System.currentTimeMillis();
-                    boolean done = iterator.step(2_500, (x, y, z) -> {
-                        int[] worldC = toWorld(x, y, z);
-                        Location loc = new Location(w, worldC[0], worldC[1], worldC[2]);
-                        for (Vector vec : DIRECTIONS_QUALITY) {
-                            rayTraceVisibleBlocks(w, loc, vec);
-                        }
-                        return false;
-                    });
-                    long t2 = System.currentTimeMillis();
-                    System.out.println("computeOpti tick duration: " + (t2 - t1));
-
-                    if (done) {
-                        AtomicInteger ii = new AtomicInteger();
-                        visibleArea.forEachMarked((x, y, z) -> {
-                            ii.incrementAndGet();
-                            return false;
-                        });
-                        System.out.println("VisibleBlocks " + ii.get());
-                        blockIterator = new CuboidBlockIterator(loc1, loc2);
-                        state = State.DELETE_BLOCKS;
-                    }
-                }
-                case DELETE_BLOCKS -> {
+                case COMPUTE_OCCLUDING -> {
                     if (!blockIterator.hasNext()) {
-                        System.out.println("End optimizing, total deletion: " + totalDeleted);
+                        System.out.println("End occluding");
+                        Bukkit.getScheduler().runTaskAsynchronously(BuildMisc.instance, () -> {
+                            computeVisible();
+                            startDeleteBlockTicking();
+                        });
                         t.cancel();
                         return;
                     }
                     for (Block b : blockIterator.next(MAX_ITERATION_PER_TICK)) {
                         if (b.isEmpty()) continue;
                         int[] localC = toLocal(b.getLocation());
-                        if (!visibleArea.get(localC[0], localC[1], localC[2])) {
-                            b.setType(Material.AIR);
-                            totalDeleted++;
+
+                        if (b.getType().isOccluding() && b.getType() != Material.BARRIER) {
+                            Bukkit.getOnlinePlayers().forEach(p -> {
+                                p.sendBlockChange(b.getLocation(), Material.EMERALD_BLOCK.createBlockData());
+                            });
+                            occludingBlocks.set(localC[0], localC[1], localC[2]);
                         }
                     }
                 }
             }
         }, 0, 1);
+    }
+
+    private void computeVisible() {
+        AtomicInteger i = new AtomicInteger();
+        occludingBlocks.forEachMarked(((x, y, z) -> {
+            int[] localC = new int[]{x, y, z};
+            AtomicInt3DMarkSet bfsSet = new AtomicInt3DMarkSet(sizeX, sizeY, sizeZ);
+            Int3DMarkSetBFS bfs = new Int3DMarkSetBFS(bfsSet, List.of(localC), coord -> {
+                if (visionArea.get(coord[0], coord[1], coord[2])) return Int3DMarkSetBFS.ValidatorResponse.GOAL;
+                return occludingBlocks.get(coord[0], coord[1], coord[2]) ? Int3DMarkSetBFS.ValidatorResponse.NON_VALIDATED : Int3DMarkSetBFS.ValidatorResponse.VALIDATED;
+            }, -1);
+            bfs.tick();
+            int[] goal = bfs.getGoal();
+            if (goal == null) return false;
+            System.out.println("Closest of  " + Arrays.toString(toWorld(x, y, z)) + " are goal " + Arrays.toString(toWorld(goal[0], goal[1], goal[2])));
+            double sx = localC[0] + 0.5, sy = localC[1] + 0.5, sz = localC[2] + 0.5;
+            double gx = goal[0] + 0.5, gy = goal[1] + 0.5, gz = goal[2] + 0.5;
+
+            if (!occludingBlocks.isLineClear(sx, sy, sz, gx, gy, gz)) {
+                toRemoveBlocks.set(localC[0], localC[1], localC[2]);
+            }
+
+            if (i.getAndIncrement() % 1000 == 0) {
+                System.out.println("Still running... " + i.get());
+            }
+            return false;
+        }));
+    }
+
+    private void startDeleteBlockTicking() {
+        blockIterator = new CuboidBlockIterator(loc1, loc2);
+        Bukkit.getScheduler().runTaskTimer(BuildMisc.instance, t -> {
+            if (!blockIterator.hasNext()) {
+                System.out.println("End optimizing, total deletion: " + totalDeleted);
+                t.cancel();
+                return;
+            }
+            for (Block b : blockIterator.next(MAX_ITERATION_PER_TICK)) {
+                if (b.isEmpty()) continue;
+                int[] localC = toLocal(b.getLocation());
+                if (toRemoveBlocks.get(localC[0], localC[1], localC[2])) {
+                    b.setType(Material.AIR);
+                    totalDeleted++;
+                }
+            }
+        }, 0, 0);
     }
 
     public static List<Vector> generate26Directions() {
@@ -182,7 +226,7 @@ public class BlockZoneOptimiser {
             Material mat = world.getBlockAt(ix, iy, iz).getType();
             if (!mat.isAir()) {
                 int[] local = toLocal(ix, iy, iz);
-                visibleArea.set(local[0], local[1], local[2]);
+                toRemoveBlocks.set(local[0], local[1], local[2]);
             }
 
             if (mat.isOccluding()) break;
@@ -235,6 +279,7 @@ public class BlockZoneOptimiser {
 
     enum State {
         FLOOD_FILL,
+        COMPUTE_OCCLUDING,
         COMPUTE_VISIBLE,
         DELETE_BLOCKS
     }
